@@ -1,4 +1,6 @@
 # PGrab
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fshivamsaraswat%2Fpgrab.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2Fshivamsaraswat%2Fpgrab?ref=badge_shield)
+
 
 PGrab is a banner grabber tool used to gather information about a remote server or device, specifically the banner or header information that is sent when a connection is made.
 
@@ -64,3 +66,6 @@ docker run -it --rm pgrab example.com -p 80 --path /
     * https (443)
     * dns (53)
     * many more...
+
+## License
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fshivamsaraswat%2Fpgrab.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2Fshivamsaraswat%2Fpgrab?ref=badge_large)
