@@ -4,31 +4,6 @@ PGrab is a banner grabber / port scanner: it gathers the banner, headers, and
 TLS certificate a host exposes, with a connect() engine plus a raw-socket
 stealth engine and firewall/IDS evasion options.
 
-## What's new in v0.5
-- **Raw stealth scans** (`--scan-type syn|fin|null|xmas`, **root required**):
-  a raw-socket engine that crafts TCP probes directly instead of completing a
-  handshake. SYN = half-open; FIN/NULL/Xmas elicit RST only from closed ports
-  on RFC-793 stacks.
-- **Packet-level evasion** (raw engine): IP **fragmentation** (`--frag`,
-  `--mtu N`), **decoys** with spoofed sources (`--decoy IP1,ME,IP2`), and
-  **TTL** control (`--ttl`).
-- **Timing templates** `-T 0..5` (paranoid → insane): set thread count, rate,
-  timeout, jitter, and port randomization together. Any explicit flag overrides
-  the template.
-- **Connect-engine evasion** (no root): random port order
-  (`--randomize-ports`), per-probe **jitter**, **source port** (`-g/--source-port`),
-  and HTTP **User-Agent** control (`--user-agent`, `--random-agent`) — the old
-  hard-coded `User-Agent: pgrab` was a trivial WAF signature.
-- **More STARTTLS**: added **LDAP** (389), **XMPP** (5222) and **PostgreSQL**
-  (5432) on top of SMTP/IMAP/POP3/FTP — grabs the certificate after the upgrade.
-
-## From v0.4 / v0.3
-- TLS auto-detection on unknown ports; STARTTLS; UDP scanning (DNS/NTP/SNMP
-  probes); HTTP chunked/gzip body decoding.
-- Working certificate parsing (v0.2 returned nothing under `CERT_NONE`), correct
-  SNI, HTTP banner inside the TLS tunnel, accurate open/closed/filtered,
-  `--max-rate`, IPv6, CSV output, graceful Ctrl-C.
-
 ## Requirements
 ```bash
 pip3 install -r requirements.txt   # colorlog, cryptography (brotli optional)
