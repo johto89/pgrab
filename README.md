@@ -1,156 +1,101 @@
 # PGrab
-[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fshivamsaraswat%2Fpgrab.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2Fshivamsaraswat%2Fpgrab?ref=badge_shield)
 
-PGrab is a banner grabber tool used to gather information about a remote server or device, specifically the banner or header information that is sent when a connection is made.
+PGrab is a banner grabber / port scanner: it gathers the banner, headers, and
+TLS certificate a host exposes, with a connect() engine plus a raw-socket
+stealth engine and firewall/IDS evasion options.
 
-## What's new in this version
-- **Default behaviour is now to scan ALL 65,535 ports** when `-p`/`--port` is omitted (previously `-p` was required and only ports 80/22 were supported).
-- **Flexible port selection**:
-  - Single port: `-p 80`
-  - Multiple ports: `-p 22,80,443`
-  - Port range: `-p 1-1024`
-  - Mixed: `-p 22,80,1000-1010`
-  - Well-known ports only: `-p known` (curated list of ~70 commonly probed service ports)
-  - All ports (explicit): `-p all`
-- **Multi-threaded scanning** (`-t/--threads`, default 200) so scanning thousands of ports is practical.
-- **Generic banner grabbing** for any port/service (not just HTTP and SSH) — reads greeting banners such as FTP, SMTP, POP3, IMAP, etc.
-- **HTTPS/TLS support** — for 443/8443 PGrab performs a TLS handshake and reports the certificate subject/issuer/expiry and negotiated TLS version/cipher.
-- **Open/closed/filtered state detection**, with `--show-closed` to include non-open ports in the output.
-- **Configurable timeout** (`--timeout`) per port connection.
+## What's new in v0.5
+- **Raw stealth scans** (`--scan-type syn|fin|null|xmas`, **root required**):
+  a raw-socket engine that crafts TCP probes directly instead of completing a
+  handshake. SYN = half-open; FIN/NULL/Xmas elicit RST only from closed ports
+  on RFC-793 stacks.
+- **Packet-level evasion** (raw engine): IP **fragmentation** (`--frag`,
+  `--mtu N`), **decoys** with spoofed sources (`--decoy IP1,ME,IP2`), and
+  **TTL** control (`--ttl`).
+- **Timing templates** `-T 0..5` (paranoid → insane): set thread count, rate,
+  timeout, jitter, and port randomization together. Any explicit flag overrides
+  the template.
+- **Connect-engine evasion** (no root): random port order
+  (`--randomize-ports`), per-probe **jitter**, **source port** (`-g/--source-port`),
+  and HTTP **User-Agent** control (`--user-agent`, `--random-agent`) — the old
+  hard-coded `User-Agent: pgrab` was a trivial WAF signature.
+- **More STARTTLS**: added **LDAP** (389), **XMPP** (5222) and **PostgreSQL**
+  (5432) on top of SMTP/IMAP/POP3/FTP — grabs the certificate after the upgrade.
 
-## Installation Through PIP
-To install dependencies, use the following command:
+## From v0.4 / v0.3
+- TLS auto-detection on unknown ports; STARTTLS; UDP scanning (DNS/NTP/SNMP
+  probes); HTTP chunked/gzip body decoding.
+- Working certificate parsing (v0.2 returned nothing under `CERT_NONE`), correct
+  SNI, HTTP banner inside the TLS tunnel, accurate open/closed/filtered,
+  `--max-rate`, IPv6, CSV output, graceful Ctrl-C.
 
+## Requirements
 ```bash
-pip3 install -r requirements.txt
+pip3 install -r requirements.txt   # colorlog, cryptography (brotli optional)
 ```
+Raw scans use only the standard library but need root / CAP_NET_RAW.
 
-## Installation with Docker
-This tool can also be used with [Docker](https://www.docker.com/). To set up the Docker environment, follow these steps (try using with sudo, if you get any error):
-
+## Usage
 ```bash
-docker build -t pgrab:latest .
+python3 main.py example.com                         # connect scan, all TCP ports
+python3 main.py example.com -p 22,80,443            # specific ports
+python3 main.py example.com -p 53,123,161 --udp     # UDP
+python3 main.py example.com -p known --both         # TCP + UDP in one run
+sudo python3 main.py example.com -p known --scan-type syn        # SYN stealth
+sudo python3 main.py example.com -p 1-1024 --scan-type syn --frag --decoy 1.2.3.4,ME
+python3 main.py example.com -p known -T 1 --random-agent -g 53   # quiet + evasive
 ```
 
-# Using PGrab
+```
+scan technique:
+  --scan-type {connect,syn,fin,null,xmas}   connect=no root; others=raw (root)
+  --udp                                     UDP instead of TCP
+  --both                                    TCP + UDP in one run (merged output)
 
-## Scan all ports (default)
-```bash
-python3 main.py example.com
+firewall / IDS evasion:
+  -T, --timing 0-5      0 paranoid .. 3 normal (default) .. 5 insane
+  --randomize-ports     scan ports in random order (default follows -T)
+  --jitter SEC          random 0..SEC delay before each probe
+  -g, --source-port N   bind probes to source port N (e.g. 53/443; <1024 root)
+  --user-agent STR      custom HTTP User-Agent
+  --random-agent        random real-browser User-Agent
+  --decoy IP1,ME,IP2    [raw] spoofed decoy sources; ME = your real host
+  --mtu N / --frag      [raw] fragment probes (--frag = --mtu 8)
+  --ttl N               [raw] IP TTL of crafted probes
 ```
 
-## Scan a single port
-```bash
-python3 main.py example.com -p 80 --path /
-```
+## Evasion — read this before relying on it
+- **A connect() scan cannot do packet-level evasion.** Fragmentation, decoys,
+  and SYN half-open all require crafting packets, which is why they live in the
+  raw engine (`--scan-type syn|fin|null|xmas`, root). On the connect engine only
+  timing, port randomization, source port, and User-Agent apply.
+- **Evading network IDS is not evading the host.** A completed connect() +
+  HTTP GET is fully logged by the target application regardless of timing tricks.
+  Stealth here means the SYN engine (no app-layer session) plus low-and-slow
+  timing, not invisibility.
+- **Kernel RST interference (raw):** when the target's SYN/ACK arrives for a
+  connection your kernel didn't open, the kernel sends an RST that can reset the
+  target early. Drop it during real scans, e.g.:
+  `iptables -A OUTPUT -p tcp --tcp-flags RST RST -s <you> -j DROP`
+- **FIN/NULL/Xmas** report `closed` only on RFC-793-compliant stacks; Windows
+  RSTs open ports too, so all show `closed`.
+- The raw engine is IPv4-only.
 
-## Scan multiple ports
-```bash
-python3 main.py example.com -p 22,80,443,8080
-```
+## Tested vs. not (be aware)
+- **Live-tested** (loopback / mocks): SYN + FIN + fragmented-SYN + decoy raw
+  scans; SMTP/PostgreSQL/LDAP/XMPP STARTTLS; TLS auto-detect + plaintext
+  fallback; UDP open/closed; chunked/gzip decode; User-Agent rotation; timing.
+- **Not tested against production services in this build**: NULL/Xmas semantics
+  on a real RFC-793 host, IMAP/POP3/FTP STARTTLS against real daemons, SNMP/NTP
+  UDP replies from real servers, decoys/fragmentation traversing a real firewall.
+  Validate in your own lab before an engagement.
 
-## Scan a port range
-```bash
-python3 main.py example.com -p 1-1024
-```
+## TODO
+- SNMP/DNS UDP response parsing (currently the raw reply is returned).
+- Idle (zombie) scan; ACK scan for firewall-rule mapping.
+- STARTTLS for PostgreSQL after auth negotiation edge cases.
 
-## Scan only well-known ports
-```bash
-python3 main.py example.com -p known
-```
-
-For an overview of all commands use the following command:
-
-```bash
-python3 main.py -h
-```
-
-The output shown below are the latest supported commands.
-
-```bash
-usage: python main.py [-h] [-p PORT] [--path PATH] [--timeout TIMEOUT]
-                       [-t THREADS] [--show-closed] [-o file_path] [-v]
-                       ip/hostname
-
-PGrab is a banner grabber tool used to gather information about a remote server or device.
-
-positional arguments:
-  ip/hostname           IP address or hostname
-
-options:
-  -h, --help            show this help message and exit
-  -p PORT, --port PORT  Port(s) to scan. Accepts a single port ('80'), a
-                        comma-separated list ('80,443,8080'), a range
-                        ('1-1024'), or the keyword 'known' for a curated
-                        well-known port list. If omitted, ALL ports
-                        (1-65535) are scanned.
-  --path PATH           Path to request on HTTP(S) ports (default: /)
-  --timeout TIMEOUT     Per-port connection timeout in seconds (default: 1.0)
-  -t THREADS, --threads THREADS
-                        Maximum number of concurrent scan threads (default: 200)
-  --show-closed         Include closed/filtered ports in the output
-                        (default: only open ports are shown)
-  -o file_path, --output file_path
-                        Output file name
-  -v, --version         show program's version number and exit
-
-Examples:
-  python3 main.py example.com                    # scan ALL ports (1-65535, default)
-  python3 main.py example.com -p 80               # scan a single port
-  python3 main.py example.com -p 22,80,443         # scan multiple ports
-  python3 main.py example.com -p 1-1024              # scan a port range
-  python3 main.py example.com -p known                # scan well-known ports only
-```
-
-## Example output
-```bash
-python3 main.py example.com -p 80,443,22 --timeout 1.5
-```
-```json
-{
-  "domain": "example.com",
-  "resolved_ip": "93.184.216.34",
-  "ports_scanned": 3,
-  "open_ports_found": 2,
-  "results": [
-    {
-      "port": 80,
-      "service": "http",
-      "state": "open",
-      "status": "success",
-      "status_line": "HTTP/1.1 200 OK",
-      "headers": ["..."],
-      "body_preview": "..."
-    },
-    {
-      "port": 443,
-      "service": "https",
-      "state": "open",
-      "status": "success",
-      "tls_version": "TLSv1.3",
-      "cipher": "TLS_AES_256_GCM_SHA384",
-      "cert_subject": {"commonName": "example.com"},
-      "cert_issuer": {"organizationName": "..."},
-      "cert_not_after": "..."
-    }
-  ]
-}
-```
-
-## Using the Docker Container
-
-A typical run through Docker would look as follows:
-
-```bash
-docker run -it --rm pgrab example.com -p 80 --path /
-```
-
-**NOTE:** Banner grabbing can be used for legitimate purposes, such as network auditing and security testing, but can also be used for malicious purposes, so use this script responsibly and with permission from the target owner. Scanning all 65,535 ports against a host you do not own or have explicit authorization to test may violate laws or acceptable-use policies — always get permission first, and consider narrowing scope with `-p known` or a specific range for routine checks.
-
-**TODO:**
-  * Add UDP scanning support
-  * Add banner grabbing for more protocols (DNS, SNMP, ...)
-  * Add rate limiting / stealth timing options
-
-## License
-[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fshivamsaraswat%2Fpgrab.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2Fshivamsaraswat%2Fpgrab?ref=badge_large)
+## Authorization
+Scanning or evading controls on hosts you do not own or lack written
+authorization to test may violate law or acceptable-use policy. Only use against
+targets you are explicitly authorized to assess.

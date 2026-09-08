@@ -1,1 +1,4 @@
 colorlog==6.7.0
+cryptography>=42.0
+# Optional: only needed to decode 'Content-Encoding: br' (Brotli) HTTP bodies.
+# brotli>=1.1.0
