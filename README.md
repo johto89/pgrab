@@ -5,11 +5,11 @@ PGrab is a banner grabber tool used to gather information about a remote server 
 
 ## What's new in this version
 - Scans **all 65,535 ports by default** when `-p` is omitted; `-p` accepts a single port, a list (`22,80,443`), a range (`1-1024`), `known`, or `all`.
-- **Multi-threaded** scanning (`-t`, default 200) and a configurable `--timeout`.
-- **TLS support**: for HTTPS ports (and any port that answers a TLS handshake) it reports the certificate subject/issuer/expiry/SAN and the negotiated TLS version and cipher.
-- **STARTTLS** upgrade for SMTP, IMAP, POP3, FTP, LDAP, XMPP and PostgreSQL.
-- **UDP scanning** (`--udp`) with DNS/NTP/SNMP probes, or **both** protocols at once (`--both`).
-- **Firewall/IDS evasion**: timing templates (`-T 0..5`), random port order, per-probe jitter, source port, and HTTP User-Agent control; plus a raw-socket engine (root) for SYN/FIN/NULL/Xmas scans, IP fragmentation, and decoys.
+- **Multi-threaded** scanning (`-t`) with a `-T 0..5` speed template and configurable `--timeout`.
+- **TLS** (`--tls`, on by default): reports certificate subject/issuer/expiry/SAN and the TLS version/cipher for HTTPS and any TLS-speaking port, and does **STARTTLS** for SMTP, IMAP, POP3, FTP, LDAP, XMPP and PostgreSQL. `--no-tls` turns all of this off.
+- **UDP scanning** (`--udp`) with parsed DNS/SNMP/NTP probes, or **both** protocols at once (`--both`).
+- **One-flag evasion** (`--bypass`): randomizes port order, adds jitter, and uses a random real-browser User-Agent on web ports.
+- **Raw stealth scans** (`--scan-type syn|fin|null|xmas|ack|idle`, root): half-open SYN, FIN/NULL/Xmas, ACK (firewall-rule mapping), and an experimental idle/zombie scan, plus fragmentation (`--mtu`), decoys (`--decoy`) and TTL control.
 - HTTP bodies are de-chunked and gzip/deflate-decoded; output as JSON (default) or CSV.
 
 ## Installation Through PIP
@@ -31,13 +31,13 @@ To run PGrab on a domain or IP, provide the domain/IP as an argument. Ports are 
 
 ```bash
 python3 main.py example.com                         # scan ALL TCP ports
-python3 main.py example.com -p 80 --path /           # a single port
-python3 main.py example.com -p 22,80,443             # multiple ports
-python3 main.py example.com -p 1-1024               # a port range
-python3 main.py example.com -p known                 # well-known ports only
-python3 main.py example.com -p 53,123,161 --udp      # UDP scan
-python3 main.py example.com -p known --both          # TCP + UDP in one run
-sudo python3 main.py example.com -p known --scan-type syn   # SYN stealth scan (root)
+python3 main.py example.com -p 80                     # a single port
+python3 main.py example.com -p 22,80,443              # multiple ports
+python3 main.py example.com -p known                  # well-known ports only
+python3 main.py example.com -p known --both           # TCP + UDP in one run
+python3 main.py example.com -p known --bypass         # firewall/IDS evasion
+sudo python3 main.py example.com -p known --scan-type syn   # SYN stealth (root)
+sudo python3 main.py example.com -p 1-1000 --scan-type ack  # map firewall rules
 ```
 
 For an overview of all commands use the following command:
@@ -49,59 +49,46 @@ python3 main.py -h
 The output shown below are the latest supported commands.
 
 ```bash
-usage: python main.py [-h] [-p PORT] [--path PATH] [--timeout TIMEOUT]
-                      [-t THREADS] [--max-rate N] [--udp] [--both]
-                      [--scan-type {connect,syn,fin,null,xmas}] [-T 0-5]
-                      [--randomize-ports | --no-randomize-ports] [--jitter SEC]
-                      [-g PORT] [--user-agent USER_AGENT] [--random-agent]
-                      [--decoy IP1,ME,IP2] [--mtu N] [--frag] [--ttl N]
-                      [--tls-detect | --no-tls-detect]
-                      [--starttls | --no-starttls] [--show-closed]
-                      [--format {json,csv}] [-o file_path] [-q] [-v]
+usage: python main.py [-h] [-p PORT] [--timeout TIMEOUT] [-t THREADS]
+                      [--max-rate N] [--udp] [--both]
+                      [--scan-type {connect,syn,fin,null,xmas,ack,idle}]
+                      [--zombie IP] [--tls | --no-tls] [-T 0-5] [--bypass]
+                      [-g PORT] [--decoy IP1,ME,IP2] [--mtu N]
+                      [--ttl N] [--show-closed] [--format {json,csv}]
+                      [-o file_path] [-q] [-v]
                       ip/hostname
-
-PGrab is a banner grabber tool used to gather information about a remote server or device.
 
 positional arguments:
   ip/hostname           IP address or hostname
 
 options:
   -h, --help            show this help message and exit
-  -p PORT, --port PORT  Port(s) to scan: '80', '80,443,8080', '1-1024',
-                        'known', or 'all'. If omitted, ALL ports are scanned.
-  --path PATH           Path to request on HTTP(S) ports (default: /)
+  -p, --port PORT       '80', '80,443,8080', '1-1024', 'known', or 'all'.
+                        If omitted, ALL ports are scanned.
   --timeout TIMEOUT     Per-port connection timeout in seconds (default: 1.0)
-  -t, --threads N       Maximum number of concurrent scan threads (default: 200)
+  -t, --threads N       Maximum concurrent scan threads (default: 200)
   --max-rate N          Cap new connections at N per second (0 = unlimited)
   --udp                 Scan UDP instead of TCP (best-effort)
   --both                Scan both TCP and UDP in one run and merge the results
-  --scan-type {connect,syn,fin,null,xmas}
-                        TCP technique. connect=full handshake (no root);
-                        syn/fin/null/xmas=raw stealth scans (root required).
-  --tls-detect / --no-tls-detect
-                        On unknown open ports, probe for TLS (default: on)
-  --starttls / --no-starttls
-                        STARTTLS on SMTP/IMAP/POP3/FTP/LDAP/XMPP/Postgres
-                        (default: on)
+  --scan-type {connect,syn,fin,null,xmas,ack,idle}
+                        connect=no root; the rest are raw (root). ack maps
+                        firewall rules; idle needs --zombie.
+  --zombie IP           Zombie host for --scan-type idle (incremental IP ID)
+  --tls / --no-tls      TLS detection + STARTTLS grabbing (default: on)
+  -T, --timing 0-5      Speed: 0 slowest .. 3 normal .. 5 fastest (default: 3)
+  --bypass              Firewall/IDS evasion: randomize ports + jitter +
+                        random real-browser User-Agent on web ports
+  -g, --source-port N   Bind probes to this source port (<1024 needs root)
+  --decoy IP1,ME,IP2    [raw] Spoofed decoy source IPs; ME = your real host
+  --mtu N               [raw] Split probes into N-byte IP fragments (N is a multiple of 8)
+  --ttl N               [raw] IP TTL for crafted probes (default: 64)
   --show-closed         Include closed/filtered ports in the output
   --format {json,csv}   Output format (default: json)
   -o file_path          Write results to this file (in addition to stdout)
   -q, --quiet           Suppress progress/log output on stderr
   -v, --version         show program's version number and exit
 
-firewall / IDS evasion:
-  -T, --timing 0-5      Timing template: 0 paranoid .. 3 normal .. 5 insane
-  --randomize-ports     Scan ports in random order (default follows -T)
-  --jitter SEC          Random 0..SEC delay before each probe
-  -g, --source-port PORT
-                        Bind probes to this source port (<1024 needs root)
-  --user-agent STR      Custom HTTP User-Agent for banner grabs
-  --random-agent        Pick a random real-browser User-Agent per run
-  --decoy IP1,ME,IP2    [raw] Spoofed decoy source IPs; 'ME' = your real host
-  --mtu N / --frag      [raw] Fragment probes (--frag = --mtu 8)
-  --ttl N               [raw] IP TTL for crafted probes (default: 64)
-
-Example: python3 main.py 192.168.0.1 -p 22 --path /
+Example: python3 main.py 192.168.0.1 -p 22
 ```
 
 ## Using the Docker Container
@@ -109,15 +96,15 @@ Example: python3 main.py 192.168.0.1 -p 22 --path /
 A typical run through Docker would look as follows:
 
 ```bash
-docker run -it --rm pgrab example.com -p 80 --path /
+docker run -it --rm pgrab example.com -p 80
 ```
 
-**NOTE:** Banner grabbing and port scanning can be used for legitimate purposes, such as network auditing and security testing, but can also be used for malicious purposes, so use this script responsibly and with permission from the target owner. A few practical points: the raw stealth scans (`--scan-type syn|fin|null|xmas`) and their evasion options (fragmentation, decoys) require root and are IPv4-only; a full `connect()` scan is logged by the target application regardless of timing, so "stealth" here means the SYN engine plus low-and-slow timing, not invisibility; and `--udp` against all ports is slow, so prefer `-p known` or a small list for UDP.
+**NOTE:** Banner grabbing and port scanning can be used for legitimate purposes, such as network auditing and security testing, but can also be used for malicious purposes, so use this script responsibly and with permission from the target owner. A few practical points: raw scans (`--scan-type syn|fin|null|xmas|ack|idle`) and their evasion options require root and are IPv4-only; a full `connect()` scan is logged by the target application regardless of timing, so evasion here means the raw engine plus `--bypass`, not invisibility; and `--udp` against all ports is slow, so prefer `-p known` for UDP. The **idle/zombie** scan is experimental and unvalidated: it needs a zombie host with a predictable, globally incremental IP ID (rare on modern systems) — confirm against a known-state target before trusting its output.
 
 **TODO:**
-  * Add UDP response parsing for SNMP/DNS (currently the raw reply is returned).
-  * Add idle (zombie) and ACK scan types.
-  * Add STARTTLS for more protocols (NNTP, PostgreSQL post-auth edge cases).
+  * Broaden DNS/SNMP response parsing (currently version.bind and sysDescr).
+  * Validate the idle scan and add IP-ID predictability checks for the zombie.
+  * Add STARTTLS for more protocols (NNTP, IMAP/POP3 edge cases).
 
 ## License
 [![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fshivamsaraswat%2Fpgrab.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2Fshivamsaraswat%2Fpgrab?ref=badge_large)

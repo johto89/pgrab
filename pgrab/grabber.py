@@ -487,7 +487,7 @@ def scan_port_tcp(ip: str, port: int, host_header: str, path: str, timeout: floa
             return result
         result["state"] = "open"
 
-        if _is_tls_port(port, service):
+        if tls_detect and _is_tls_port(port, service):
             owned = False
             result.update(_grab_tls(sock, host_header, port, path, timeout,
                                     try_http=(port in HTTPS_WEB), user_agent=user_agent))
@@ -552,6 +552,80 @@ UDP_PROBES = {
     161: _SNMP_PROBE,
 }
 
+_DNS_RCODES = {0: "NOERROR", 1: "FORMERR", 2: "SERVFAIL", 3: "NXDOMAIN",
+               4: "NOTIMP", 5: "REFUSED"}
+
+
+def _skip_qname(data: bytes, off: int) -> int:
+    """Advance past a DNS name (labels or a compression pointer)."""
+    while off < len(data):
+        length = data[off]
+        if length == 0:
+            return off + 1
+        if length & 0xC0 == 0xC0:  # compression pointer
+            return off + 2
+        off += 1 + length
+    return off
+
+
+def _parse_dns_response(data: bytes) -> dict:
+    """Turn a DNS reply into fields (rcode, answer count, version.bind TXT)."""
+    if len(data) < 12:
+        return {}
+    _, flags, qd, an, _, _ = struct.unpack(">HHHHHH", data[:12])
+    info = {"dns_rcode": _DNS_RCODES.get(flags & 0xF, str(flags & 0xF)),
+            "dns_answers": an}
+    off = 12
+    try:
+        for _ in range(qd):
+            off = _skip_qname(data, off) + 4  # + type + class
+        for _ in range(an):
+            off = _skip_qname(data, off)
+            atype, _cls, _ttl, rdlen = struct.unpack(">HHIH", data[off:off + 10])
+            off += 10
+            rdata = data[off:off + rdlen]
+            off += rdlen
+            if atype == 16 and rdata:  # TXT
+                txtlen = rdata[0]
+                info["dns_version"] = rdata[1:1 + txtlen].decode(errors="replace")
+                break
+    except (struct.error, IndexError):
+        pass
+    return info
+
+
+def _ber_len(data: bytes, off: int) -> tuple[int, int]:
+    """Decode a BER length at off; return (length, new_off)."""
+    first = data[off]
+    off += 1
+    if first < 0x80:
+        return first, off
+    n = first & 0x7F
+    length = int.from_bytes(data[off:off + n], "big")
+    return length, off + n
+
+
+def _parse_snmp_response(data: bytes) -> dict:
+    """Extract sysDescr (and error-status) from an SNMP GetResponse."""
+    info: dict = {}
+    # sysDescr.0 OID as encoded in the request/response.
+    oid = bytes.fromhex("06082b06010201010100")
+    idx = data.find(oid)
+    if idx == -1:
+        return info
+    voff = idx + len(oid)
+    try:
+        tag = data[voff]
+        length, voff = _ber_len(data, voff + 1)
+        value = data[voff:voff + length]
+        if tag == 0x04:  # OCTET STRING
+            info["snmp_sysdescr"] = value.decode(errors="replace").strip()
+        elif tag == 0x05:  # NULL -> no such object
+            info["snmp_note"] = "no value returned"
+    except (IndexError, struct.error):
+        pass
+    return info
+
 
 def scan_port_udp(ip: str, port: int, timeout: float,
                   family: int = socket.AF_INET, limiter: RateLimiter = _NO_LIMIT,
@@ -577,8 +651,16 @@ def scan_port_udp(ip: str, port: int, timeout: float,
                 data = sock.recv(4096)
                 result["state"] = "open"
                 if data:
-                    text = data.decode(errors="replace").strip()
-                    result["banner"] = text[:500] if text.isprintable() else data.hex()[:200]
+                    parsed = {}
+                    if port == 53:
+                        parsed = _parse_dns_response(data)
+                    elif port == 161:
+                        parsed = _parse_snmp_response(data)
+                    if parsed:
+                        result.update(parsed)
+                    else:
+                        text = data.decode(errors="replace").strip()
+                        result["banner"] = text[:500] if text.isprintable() else data.hex()[:200]
                 return result
             except socket.timeout:
                 continue  # retry

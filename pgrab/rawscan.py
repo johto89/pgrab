@@ -45,6 +45,7 @@ SCAN_FLAGS = {
     "fin": FIN,
     "null": 0x00,
     "xmas": FIN | PSH | URG,
+    "ack": ACK,
 }
 
 
@@ -220,7 +221,7 @@ def raw_scan(dst_ip: str, ports: list[int], scan_type: str = "syn",
             time.sleep(random.uniform(0, jitter))
 
     # 2) Collect replies until the timeout window elapses.
-    state: dict[int, str] = {}
+    reply: dict[int, str] = {}
     deadline = time.time() + timeout
     while time.time() < deadline:
         ready, _, _ = select.select([recv_sock], [], [], max(0.0, deadline - time.time()))
@@ -237,22 +238,118 @@ def raw_scan(dst_ip: str, ports: list[int], scan_type: str = "syn",
         if rdst_port != src_port or rsrc_port not in ports:
             continue
         if rflags & SYN and rflags & ACK:
-            state[rsrc_port] = "open"          # SYN scan: SYN/ACK => open
+            reply[rsrc_port] = "synack"
         elif rflags & RST:
-            state[rsrc_port] = "closed"        # RST => closed
+            reply[rsrc_port] = "rst"
     send_sock.close()
     recv_sock.close()
 
-    # 3) Classify.
+    # 3) Classify per scan technique.
     results = []
     for port in ports:
-        st = state.get(port)
-        if st is None:
-            # No reply: filtered for SYN; open|filtered for FIN/NULL/Xmas.
-            st = "filtered" if scan_type == "syn" else "open|filtered"
+        r = reply.get(port)
+        if scan_type == "syn":
+            st = "open" if r == "synack" else ("closed" if r == "rst" else "filtered")
+        elif scan_type == "ack":
+            # ACK scan maps firewall rules: an RST means the packet reached the
+            # host (unfiltered); silence means a stateful firewall dropped it.
+            st = "unfiltered" if r == "rst" else "filtered"
+        else:  # fin / null / xmas
+            st = "closed" if r == "rst" else "open|filtered"
         results.append({
             "port": port, "proto": "tcp", "scan": scan_type,
             "service": _get_service(port), "state": st,
         })
+    results.sort(key=lambda r: r["port"])
+    return results
+
+
+# --- idle / zombie scan (EXPERIMENTAL) --------------------------------------
+
+def _ip_id_of(zombie_ip: str, recv_sock: socket.socket, timeout: float,
+              src_ip: str, src_port: int) -> Optional[int]:
+    """Probe the zombie's current IP ID by soliciting a RST from it.
+
+    Sends a SYN/ACK to the zombie (closed-ish port); the zombie replies RST and,
+    on a host with a global incremental IP-ID counter, that reply's IP ID tells
+    us the counter's value. Returns the IP ID, or None on no reply.
+    """
+    send = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
+    send.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
+    try:
+        tcp = _tcp_segment(src_ip, zombie_ip, src_port, 40000, SYN | ACK,
+                           random.randint(0, 0xFFFFFFFF))
+        pkt = _ip_header(src_ip, zombie_ip, len(tcp), random.randint(0, 0xFFFF), 64) + tcp
+        send.sendto(pkt, (zombie_ip, 0))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            ready, _, _ = select.select([recv_sock], [], [], max(0.0, deadline - time.time()))
+            if not ready:
+                break
+            packet, addr = recv_sock.recvfrom(65535)
+            if addr[0] != zombie_ip or len(packet) < 20:
+                continue
+            ip_id = struct.unpack(">H", packet[4:6])[0]
+            return ip_id
+    except OSError:
+        return None
+    finally:
+        send.close()
+    return None
+
+
+def idle_scan(target_ip: str, ports: list[int], zombie_ip: str,
+              timeout: float = 2.0,
+              progress: Optional[Callable[[int, int], None]] = None) -> list[dict]:
+    """EXPERIMENTAL blind (idle/zombie) scan via a third host's IP-ID counter.
+
+    For each target port we: read the zombie's IP ID, spoof a SYN to the target
+    with the zombie as source, then read the zombie's IP ID again. If the target
+    port is open it SYN/ACKs the zombie, the zombie RSTs (its counter +1), so the
+    counter jumps by 2 relative to our own probe; +1 means closed/filtered.
+
+    NOT VALIDATED in this build: it needs a zombie with a predictable, globally
+    incremental IP ID (rare on modern OSes) and no competing traffic. Treat the
+    output as best-effort and confirm against a known-state target first.
+    """
+    src_ip = _local_ip(target_ip)
+    src_port = random.randint(1025, 65000)
+
+    recv_sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
+    recv_sock.setblocking(False)
+    spoof = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
+    spoof.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
+
+    results = []
+    try:
+        for idx, port in enumerate(ports):
+            id1 = _ip_id_of(zombie_ip, recv_sock, timeout, src_ip, src_port)
+            # Spoofed SYN: source = zombie, so the target replies to the zombie.
+            tcp = _tcp_segment(zombie_ip, target_ip, src_port, port, SYN,
+                               random.randint(0, 0xFFFFFFFF))
+            pkt = _ip_header(zombie_ip, target_ip, len(tcp),
+                             random.randint(0, 0xFFFF), 64) + tcp
+            try:
+                spoof.sendto(pkt, (target_ip, 0))
+            except OSError:
+                pass
+            time.sleep(0.1)
+            id2 = _ip_id_of(zombie_ip, recv_sock, timeout, src_ip, src_port)
+
+            if id1 is None or id2 is None:
+                st = "unknown (no zombie reply)"
+            else:
+                delta = (id2 - id1) & 0xFFFF
+                # +1 from our own second probe is expected; +2 total => open.
+                st = "open" if delta >= 2 else "closed|filtered"
+            results.append({
+                "port": port, "proto": "tcp", "scan": "idle",
+                "service": _get_service(port), "state": st, "zombie": zombie_ip,
+            })
+            if progress:
+                progress(idx + 1, len(ports))
+    finally:
+        recv_sock.close()
+        spoof.close()
     results.sort(key=lambda r: r["port"])
     return results
